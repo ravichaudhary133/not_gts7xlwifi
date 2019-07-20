@@ -1456,6 +1456,7 @@ static int adreno_probe(struct platform_device *pdev)
 		dev_warn(device->dev,
 			"Failed to get gpuhtw LLC slice descriptor %ld\n",
 			PTR_ERR(adreno_dev->gpuhtw_llc_slice));
+
 out:
 	if (status) {
 		adreno_ringbuffer_close(adreno_dev);
