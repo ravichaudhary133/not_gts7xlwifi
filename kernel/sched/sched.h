@@ -2015,11 +2015,10 @@ extern struct sched_class __end_sched_classes[];
 #define sched_class_lowest  (__begin_sched_classes - 1)
 
 #define for_class_range(class, _from, _to) \
-	for (class = (_from); class != (_to); class = class->next)
-
+	for (class = (_from); class != (_to); class--)
 
 #define for_each_class(class) \
-	for_class_range(class, sched_class_highest, NULL)
+	for_class_range(class, sched_class_highest, sched_class_lowest)
 
 extern const struct sched_class stop_sched_class;
 extern const struct sched_class dl_sched_class;
