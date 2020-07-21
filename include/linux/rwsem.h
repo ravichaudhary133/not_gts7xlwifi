@@ -19,6 +19,7 @@
 #ifdef CONFIG_RWSEM_SPIN_ON_OWNER
 #include <linux/osq_lock.h>
 #endif
+#include <linux/android_vendor.h>
 
 struct rw_semaphore;
 
@@ -46,6 +47,7 @@ struct rw_semaphore {
 	/* count for waiters preempt to queue in wait list */
 	long m_count;
 #endif
+	ANDROID_VENDOR_DATA(1);
 };
 
 /*
