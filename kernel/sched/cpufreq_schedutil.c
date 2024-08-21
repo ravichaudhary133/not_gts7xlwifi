@@ -62,13 +62,9 @@ struct sugov_cpu {
 	unsigned int flags;
 
 	unsigned long		bw_dl;
+	unsigned long		bw_min;
 	unsigned long		min;
 	unsigned long		max;
-
-	/* The field below is for single-CPU policies only: */
-#ifdef CONFIG_NO_HZ_COMMON
-	unsigned long		saved_idle_calls;
-#endif
 };
 
 static DEFINE_PER_CPU(struct sugov_cpu, sugov_cpu);
@@ -495,7 +491,7 @@ static unsigned long sugov_iowait_apply(struct sugov_cpu *sg_cpu, u64 time,
 	boost = (sg_cpu->iowait_boost * max) >> SCHED_CAPACITY_SHIFT;
 	boost = max(boost, util);
 	boost = uclamp_rq_util_with(cpu_rq(sg_cpu->cpu), boost, NULL);
-
+ 
 	return boost;
 }
 
