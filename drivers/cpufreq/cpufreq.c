@@ -1306,9 +1306,7 @@ static int cpufreq_online(unsigned int cpu)
 		/* Are we running at unknown frequency ? */
 		ret = cpufreq_frequency_table_get_index(policy, policy->cur);
 		if (ret == -EINVAL) {
-			/* Warn user and fix it */
-			pr_warn("%s: CPU%d: Running at unlisted freq: %u KHz\n",
-				__func__, policy->cpu, policy->cur);
+			/* fix it */
 			ret = __cpufreq_driver_target(policy, policy->cur - 1,
 				CPUFREQ_RELATION_L);
 
@@ -1318,8 +1316,6 @@ static int cpufreq_online(unsigned int cpu)
 			 * frequency for longer duration. Hence, a BUG_ON().
 			 */
 			BUG_ON(ret);
-			pr_warn("%s: CPU%d: Unlisted initial frequency changed to: %u KHz\n",
-				__func__, policy->cpu, policy->cur);
 		}
 	}
 
