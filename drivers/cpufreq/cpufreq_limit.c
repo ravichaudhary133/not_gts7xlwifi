@@ -133,10 +133,6 @@ static struct cpufreq_limit_handle
 		.name = "multi-touch",
 		.id = DVFS_MULTI_TOUCH_ID
 	},
-	{
-		.name = "argos",
-		.id = DVFS_ARGOS_ID
-	},
 #ifdef CONFIG_USB_AUDIO_ENHANCED_DETECT_TIME
 	{
 		.name = "boost-host",
