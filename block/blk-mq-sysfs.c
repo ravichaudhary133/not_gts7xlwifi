@@ -10,7 +10,6 @@
 #include <linux/smp.h>
 
 #include <linux/blk-mq.h>
-#include "blk.h"
 #include "blk-mq.h"
 #include "blk-mq-tag.h"
 
@@ -22,11 +21,6 @@ static void blk_mq_hw_sysfs_release(struct kobject *kobj)
 {
 	struct blk_mq_hw_ctx *hctx = container_of(kobj, struct blk_mq_hw_ctx,
 						  kobj);
-
-	if (hctx->flags & BLK_MQ_F_BLOCKING)
-		cleanup_srcu_struct(hctx->srcu);
-	blk_free_flush_queue(hctx->fq);
-	sbitmap_free(&hctx->ctx_map);
 	free_cpumask_var(hctx->cpumask);
 	kfree(hctx->ctxs);
 	kfree(hctx);
@@ -172,6 +166,11 @@ static ssize_t blk_mq_hw_sysfs_cpus_show(struct blk_mq_hw_ctx *hctx, char *page)
 	return pos + ret;
 }
 
+static ssize_t blk_mq_hw_sysfs_type_show(struct blk_mq_hw_ctx *hctx, char *page)
+{
+	return sprintf(page, "%u\n", hctx->type);
+}
+
 static struct attribute *default_ctx_attrs[] = {
 	NULL,
 };
@@ -188,11 +187,16 @@ static struct blk_mq_hw_ctx_sysfs_entry blk_mq_hw_sysfs_cpus = {
 	.attr = {.name = "cpu_list", .mode = 0444 },
 	.show = blk_mq_hw_sysfs_cpus_show,
 };
+static struct blk_mq_hw_ctx_sysfs_entry blk_mq_hw_sysfs_type = {
+	.attr = {.name = "type", .mode = 0444 },
+	.show = blk_mq_hw_sysfs_type_show,
+};
 
 static struct attribute *default_hw_ctx_attrs[] = {
 	&blk_mq_hw_sysfs_nr_tags.attr,
 	&blk_mq_hw_sysfs_nr_reserved_tags.attr,
 	&blk_mq_hw_sysfs_cpus.attr,
+	&blk_mq_hw_sysfs_type.attr,
 	NULL,
 };
 
@@ -358,7 +362,6 @@ int blk_mq_register_dev(struct device *dev, struct request_queue *q)
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(blk_mq_register_dev);
 
 void blk_mq_sysfs_unregister(struct request_queue *q)
 {

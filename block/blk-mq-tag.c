@@ -134,7 +134,8 @@ unsigned int blk_mq_get_tag(struct blk_mq_alloc_data *data)
 		io_schedule();
 
 		data->ctx = blk_mq_get_ctx(data->q);
-		data->hctx = blk_mq_map_queue(data->q, data->ctx->cpu);
+		data->hctx = blk_mq_map_queue(data->q, data->cmd_flags,
+						data->ctx->cpu);
 		tags = blk_mq_tags_from_data(data);
 		if (data->flags & BLK_MQ_REQ_RESERVED)
 			bt = &tags->breserved_tags;
@@ -201,10 +202,24 @@ static bool bt_iter(struct sbitmap *bitmap, unsigned int bitnr, void *data)
 	 * test and set the bit before assining ->rqs[].
 	 */
 	if (rq && rq->q == hctx->queue)
-		iter_data->fn(hctx, rq, iter_data->data, reserved);
+		return iter_data->fn(hctx, rq, iter_data->data, reserved);
 	return true;
 }
 
+/**
+ * bt_for_each - iterate over the requests associated with a hardware queue
+ * @hctx:	Hardware queue to examine.
+ * @bt:		sbitmap to examine. This is either the breserved_tags member
+ *		or the bitmap_tags member of struct blk_mq_tags.
+ * @fn:		Pointer to the function that will be called for each request
+ *		associated with @hctx that has been assigned a driver tag.
+ *		@fn will be called as follows: @fn(@hctx, rq, @data, @reserved)
+ *		where rq is a pointer to a request. Return true to continue
+ *		iterating tags, false to stop.
+ * @data:	Will be passed as third argument to @fn.
+ * @reserved:	Indicates whether @bt is the breserved_tags member or the
+ *		bitmap_tags member of struct blk_mq_tags.
+ */
 static void bt_for_each(struct blk_mq_hw_ctx *hctx, struct sbitmap_queue *bt,
 			busy_iter_fn *fn, void *data, bool reserved)
 {
@@ -241,11 +256,24 @@ static bool bt_tags_iter(struct sbitmap *bitmap, unsigned int bitnr, void *data)
 	 */
 	rq = tags->rqs[bitnr];
 	if (rq && blk_mq_request_started(rq))
-		iter_data->fn(rq, iter_data->data, reserved);
+		return iter_data->fn(rq, iter_data->data, reserved);
 
 	return true;
 }
 
+/**
+ * bt_tags_for_each - iterate over the requests in a tag map
+ * @tags:	Tag map to iterate over.
+ * @bt:		sbitmap to examine. This is either the breserved_tags member
+ *		or the bitmap_tags member of struct blk_mq_tags.
+ * @fn:		Pointer to the function that will be called for each started
+ *		request. @fn will be called as follows: @fn(rq, @data,
+ *		@reserved) where rq is a pointer to a request. Return true
+ *		to continue iterating tags, false to stop.
+ * @data:	Will be passed as second argument to @fn.
+ * @reserved:	Indicates whether @bt is the breserved_tags member or the
+ *		bitmap_tags member of struct blk_mq_tags.
+ */
 static void bt_tags_for_each(struct blk_mq_tags *tags, struct sbitmap_queue *bt,
 			     busy_tag_iter_fn *fn, void *data, bool reserved)
 {
@@ -260,6 +288,16 @@ static void bt_tags_for_each(struct blk_mq_tags *tags, struct sbitmap_queue *bt,
 		sbitmap_for_each_set(&bt->sb, bt_tags_iter, &iter_data);
 }
 
+/**
+ * blk_mq_all_tag_busy_iter - iterate over all started requests in a tag map
+ * @tags:	Tag map to iterate over.
+ * @fn:		Pointer to the function that will be called for each started
+ *		request. @fn will be called as follows: @fn(rq, @priv,
+ *		reserved) where rq is a pointer to a request. 'reserved'
+ *		indicates whether or not @rq is a reserved request. Return
+ *		true to continue iterating tags, false to stop.
+ * @priv:	Will be passed as second argument to @fn.
+ */
 static void blk_mq_all_tag_busy_iter(struct blk_mq_tags *tags,
 		busy_tag_iter_fn *fn, void *priv)
 {
@@ -268,6 +306,16 @@ static void blk_mq_all_tag_busy_iter(struct blk_mq_tags *tags,
 	bt_tags_for_each(tags, &tags->bitmap_tags, fn, priv, false);
 }
 
+/**
+ * blk_mq_tagset_busy_iter - iterate over all started requests in a tag set
+ * @tagset:	Tag set to iterate over.
+ * @fn:		Pointer to the function that will be called for each started
+ *		request. @fn will be called as follows: @fn(rq, @priv,
+ *		reserved) where rq is a pointer to a request. 'reserved'
+ *		indicates whether or not @rq is a reserved request. Return
+ *		true to continue iterating tags, false to stop.
+ * @priv:	Will be passed as second argument to @fn.
+ */
 void blk_mq_tagset_busy_iter(struct blk_mq_tag_set *tagset,
 		busy_tag_iter_fn *fn, void *priv)
 {
@@ -436,16 +484,7 @@ int blk_mq_tag_update_depth(struct blk_mq_hw_ctx *hctx,
  */
 u32 blk_mq_unique_tag(struct request *rq)
 {
-	struct request_queue *q = rq->q;
-	struct blk_mq_hw_ctx *hctx;
-	int hwq = 0;
-
-	if (q->mq_ops) {
-		hctx = blk_mq_map_queue(q, rq->mq_ctx->cpu);
-		hwq = hctx->queue_num;
-	}
-
-	return (hwq << BLK_MQ_UNIQUE_TAG_BITS) |
+	return (rq->mq_hctx->queue_num << BLK_MQ_UNIQUE_TAG_BITS) |
 		(rq->tag & BLK_MQ_UNIQUE_TAG_MASK);
 }
 EXPORT_SYMBOL(blk_mq_unique_tag);

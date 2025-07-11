@@ -308,7 +308,7 @@ enum blk_eh_timer_return scsi_times_out(struct request *req)
 		 * error handler. In that case we can return immediately as no
 		 * further action is required.
 		 */
-		if (req->q->mq_ops && !blk_mq_mark_complete(req))
+		if (!blk_mq_mark_complete(req))
 			return rtn;
 		if (scsi_abort_command(scmd) != SUCCESS) {
 			set_host_byte(scmd, DID_TIME_OUT);
@@ -337,9 +337,6 @@ int scsi_block_when_processing_errors(struct scsi_device *sdev)
 	wait_event(sdev->host->host_wait, !scsi_host_in_recovery(sdev->host));
 
 	online = scsi_device_online(sdev);
-
-	SCSI_LOG_ERROR_RECOVERY(5, sdev_printk(KERN_INFO, sdev,
-		"%s: rtn: %d\n", __func__, online));
 
 	return online;
 }
@@ -1938,7 +1935,7 @@ maybe_retry:
 
 static void eh_lock_door_done(struct request *req, blk_status_t status)
 {
-	__blk_put_request(req->q, req);
+	blk_put_request(req);
 }
 
 /**

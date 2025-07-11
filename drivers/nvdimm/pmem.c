@@ -406,7 +406,7 @@ static int pmem_attach_disk(struct device *dev,
 		return -EBUSY;
 	}
 
-	q = blk_alloc_queue_node(GFP_KERNEL, dev_to_node(dev), NULL);
+	q = blk_alloc_queue_node(GFP_KERNEL, dev_to_node(dev));
 	if (!q)
 		return -ENOMEM;
 
@@ -482,7 +482,7 @@ static int pmem_attach_disk(struct device *dev,
 	gendev = disk_to_dev(disk);
 	gendev->groups = pmem_attribute_groups;
 
-	device_add_disk(dev, disk);
+	device_add_disk(dev, disk, NULL);
 	if (devm_add_action_or_reset(dev, pmem_release_disk, pmem))
 		return -ENOMEM;
 

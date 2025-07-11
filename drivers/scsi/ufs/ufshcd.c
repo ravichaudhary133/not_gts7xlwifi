@@ -10740,11 +10740,13 @@ reinit:
 		scsi_scan_host(hba->host);
 #if defined(CONFIG_UFSFEATURE)
 		ufsf_device_check(hba);
+#ifdef CONFIG_UFSHPB
 		ufsf_hpb_init(&hba->ufsf);
 		if (hba->ufsf.hpb_dev_info.hpb_device) {
 			ufshcd_add_hpb_info_sysfs_node(hba);
 			get_monotonic_boottime(&(hba->SEC_hpb_info.timestamp_old));
 		}
+#endif
 #endif
 		pm_runtime_put_sync(hba->dev);
 	}
@@ -13135,12 +13137,6 @@ int ufshcd_alloc_host(struct device *dev, struct ufs_hba **hba_handle)
 		err = -ENOMEM;
 		goto out_error;
 	}
-
-	/*
-	 * Do not use blk-mq at this time because blk-mq does not support
-	 * runtime pm.
-	 */
-	host->use_blk_mq = false;
 
 	hba = shost_priv(host);
 	hba->host = host;

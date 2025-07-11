@@ -46,6 +46,7 @@
 #include <linux/blkdev.h>
 #include <linux/backing-dev.h>
 #include <linux/blkpg.h>
+#include <linux/blk-pm.h>
 #include <linux/delay.h>
 #include <linux/mutex.h>
 #include <linux/string_helpers.h>
@@ -120,7 +121,7 @@ static int sd_suspend_system(struct device *);
 static int sd_suspend_runtime(struct device *);
 static int sd_resume(struct device *);
 static void sd_rescan(struct device *);
-static int sd_init_command(struct scsi_cmnd *SCpnt);
+static blk_status_t sd_init_command(struct scsi_cmnd *SCpnt);
 static void sd_uninit_command(struct scsi_cmnd *SCpnt);
 static int sd_done(struct scsi_cmnd *);
 static void sd_eh_reset(struct scsi_cmnd *);
@@ -763,7 +764,7 @@ static void sd_config_discard(struct scsi_disk *sdkp, unsigned int mode)
 	blk_queue_flag_set(QUEUE_FLAG_DISCARD, q);
 }
 
-static int sd_setup_unmap_cmnd(struct scsi_cmnd *cmd)
+static blk_status_t sd_setup_unmap_cmnd(struct scsi_cmnd *cmd)
 {
 	struct scsi_device *sdp = cmd->device;
 	struct request *rq = cmd->request;
@@ -774,7 +775,7 @@ static int sd_setup_unmap_cmnd(struct scsi_cmnd *cmd)
 
 	rq->special_vec.bv_page = mempool_alloc(sd_page_pool, GFP_ATOMIC);
 	if (!rq->special_vec.bv_page)
-		return BLKPREP_DEFER;
+		return BLK_STS_RESOURCE;
 	clear_highpage(rq->special_vec.bv_page);
 	rq->special_vec.bv_offset = 0;
 	rq->special_vec.bv_len = data_len;
@@ -798,7 +799,8 @@ static int sd_setup_unmap_cmnd(struct scsi_cmnd *cmd)
 	return scsi_init_io(cmd);
 }
 
-static int sd_setup_write_same16_cmnd(struct scsi_cmnd *cmd, bool unmap)
+static blk_status_t sd_setup_write_same16_cmnd(struct scsi_cmnd *cmd,
+		bool unmap)
 {
 	struct scsi_device *sdp = cmd->device;
 	struct request *rq = cmd->request;
@@ -808,7 +810,7 @@ static int sd_setup_write_same16_cmnd(struct scsi_cmnd *cmd, bool unmap)
 
 	rq->special_vec.bv_page = mempool_alloc(sd_page_pool, GFP_ATOMIC);
 	if (!rq->special_vec.bv_page)
-		return BLKPREP_DEFER;
+		return BLK_STS_RESOURCE;
 	clear_highpage(rq->special_vec.bv_page);
 	rq->special_vec.bv_offset = 0;
 	rq->special_vec.bv_len = data_len;
@@ -829,7 +831,8 @@ static int sd_setup_write_same16_cmnd(struct scsi_cmnd *cmd, bool unmap)
 	return scsi_init_io(cmd);
 }
 
-static int sd_setup_write_same10_cmnd(struct scsi_cmnd *cmd, bool unmap)
+static blk_status_t sd_setup_write_same10_cmnd(struct scsi_cmnd *cmd,
+		bool unmap)
 {
 	struct scsi_device *sdp = cmd->device;
 	struct request *rq = cmd->request;
@@ -839,7 +842,7 @@ static int sd_setup_write_same10_cmnd(struct scsi_cmnd *cmd, bool unmap)
 
 	rq->special_vec.bv_page = mempool_alloc(sd_page_pool, GFP_ATOMIC);
 	if (!rq->special_vec.bv_page)
-		return BLKPREP_DEFER;
+		return BLK_STS_RESOURCE;
 	clear_highpage(rq->special_vec.bv_page);
 	rq->special_vec.bv_offset = 0;
 	rq->special_vec.bv_len = data_len;
@@ -860,7 +863,7 @@ static int sd_setup_write_same10_cmnd(struct scsi_cmnd *cmd, bool unmap)
 	return scsi_init_io(cmd);
 }
 
-static int sd_setup_write_zeroes_cmnd(struct scsi_cmnd *cmd)
+static blk_status_t sd_setup_write_zeroes_cmnd(struct scsi_cmnd *cmd)
 {
 	struct request *rq = cmd->request;
 	struct scsi_device *sdp = cmd->device;
@@ -878,7 +881,7 @@ static int sd_setup_write_zeroes_cmnd(struct scsi_cmnd *cmd)
 	}
 
 	if (sdp->no_write_same)
-		return BLKPREP_INVALID;
+		return BLK_STS_TARGET;
 
 	if (sdkp->ws16 || sector > 0xffffffff || nr_sectors > 0xffff)
 		return sd_setup_write_same16_cmnd(cmd, false);
@@ -955,7 +958,7 @@ out:
  * Will set up either WRITE SAME(10) or WRITE SAME(16) depending on
  * the preference indicated by the target device.
  **/
-static int sd_setup_write_same_cmnd(struct scsi_cmnd *cmd)
+static blk_status_t sd_setup_write_same_cmnd(struct scsi_cmnd *cmd)
 {
 	struct request *rq = cmd->request;
 	struct scsi_device *sdp = cmd->device;
@@ -964,10 +967,10 @@ static int sd_setup_write_same_cmnd(struct scsi_cmnd *cmd)
 	sector_t sector = blk_rq_pos(rq);
 	unsigned int nr_sectors = blk_rq_sectors(rq);
 	unsigned int nr_bytes = blk_rq_bytes(rq);
-	int ret;
+	blk_status_t ret;
 
 	if (sdkp->device->no_write_same)
-		return BLKPREP_INVALID;
+		return BLK_STS_TARGET;
 
 	BUG_ON(bio_offset(bio) || bio_iovec(bio).bv_len != sdp->sector_size);
 
@@ -1011,7 +1014,7 @@ static int sd_setup_write_same_cmnd(struct scsi_cmnd *cmd)
 	return ret;
 }
 
-static int sd_setup_flush_cmnd(struct scsi_cmnd *cmd)
+static blk_status_t sd_setup_flush_cmnd(struct scsi_cmnd *cmd)
 {
 	struct request *rq = cmd->request;
 
@@ -1028,10 +1031,10 @@ static int sd_setup_flush_cmnd(struct scsi_cmnd *cmd)
 	else
 		rq->timeout = rq->q->rq_timeout * SD_FLUSH_TIMEOUT_MULTIPLIER;
 
-	return BLKPREP_OK;
+	return BLK_STS_OK;
 }
 
-static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
+static blk_status_t sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 {
 	struct request *rq = SCpnt->request;
 	struct scsi_device *sdp = SCpnt->device;
@@ -1041,17 +1044,13 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 	sector_t threshold;
 	unsigned int this_count = blk_rq_sectors(rq);
 	unsigned int dif, dix;
-	int ret;
 	unsigned char protect;
+	blk_status_t ret;
 
 	ret = scsi_init_io(SCpnt);
-	if (ret != BLKPREP_OK)
+	if (ret != BLK_STS_OK)
 		return ret;
 	WARN_ON_ONCE(SCpnt != rq->special);
-
-	/* from here on until we're complete, any goto out
-	 * is used for a killable error condition */
-	ret = BLKPREP_KILL;
 
 	SCSI_LOG_HLQUEUE(1,
 		scmd_printk(KERN_INFO, SCpnt,
@@ -1065,7 +1064,7 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 						blk_rq_sectors(rq)));
 		SCSI_LOG_HLQUEUE(2, scmd_printk(KERN_INFO, SCpnt,
 						"Retry with 0x%p\n", SCpnt));
-		goto out;
+		return BLK_STS_IOERR;
 	}
 
 	if (sdp->changed) {
@@ -1074,7 +1073,7 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 		 * the changed bit has been reset
 		 */
 		/* printk("SCSI disk has been changed or is not present. Prohibiting further I/O.\n"); */
-		goto out;
+		return BLK_STS_IOERR;
 	}
 
 	/*
@@ -1112,31 +1111,28 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 		if ((block & 1) || (blk_rq_sectors(rq) & 1)) {
 			scmd_printk(KERN_ERR, SCpnt,
 				    "Bad block number requested\n");
-			goto out;
-		} else {
-			block = block >> 1;
-			this_count = this_count >> 1;
+			return BLK_STS_IOERR;
 		}
+		block = block >> 1;
+		this_count = this_count >> 1;
 	}
 	if (sdp->sector_size == 2048) {
 		if ((block & 3) || (blk_rq_sectors(rq) & 3)) {
 			scmd_printk(KERN_ERR, SCpnt,
 				    "Bad block number requested\n");
-			goto out;
-		} else {
-			block = block >> 2;
-			this_count = this_count >> 2;
+			return BLK_STS_IOERR;
 		}
+		block = block >> 2;
+		this_count = this_count >> 2;
 	}
 	if (sdp->sector_size == 4096) {
 		if ((block & 7) || (blk_rq_sectors(rq) & 7)) {
 			scmd_printk(KERN_ERR, SCpnt,
 				    "Bad block number requested\n");
-			goto out;
-		} else {
-			block = block >> 3;
-			this_count = this_count >> 3;
+			return BLK_STS_IOERR;
 		}
+		block = block >> 3;
+		this_count = this_count >> 3;
 	}
 	if (rq_data_dir(rq) == WRITE) {
 		SCpnt->cmnd[0] = WRITE_6;
@@ -1148,7 +1144,7 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 		SCpnt->cmnd[0] = READ_6;
 	} else {
 		scmd_printk(KERN_ERR, SCpnt, "Unknown command %d\n", req_op(rq));
-		goto out;
+		return BLK_STS_IOERR;
 	}
 
 	SCSI_LOG_HLQUEUE(2, scmd_printk(KERN_INFO, SCpnt,
@@ -1168,10 +1164,8 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 	if (protect && sdkp->protection_type == T10_PI_TYPE2_PROTECTION) {
 		SCpnt->cmnd = mempool_alloc(sd_cdb_pool, GFP_ATOMIC);
 
-		if (unlikely(SCpnt->cmnd == NULL)) {
-			ret = BLKPREP_DEFER;
-			goto out;
-		}
+		if (unlikely(!SCpnt->cmnd))
+			return BLK_STS_RESOURCE;
 
 		SCpnt->cmd_len = SD_EXT_CDB_SIZE;
 		memset(SCpnt->cmnd, 0, SCpnt->cmd_len);
@@ -1239,7 +1233,7 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 			 */
 			scmd_printk(KERN_ERR, SCpnt,
 				    "FUA write on READ/WRITE(6) drive\n");
-			goto out;
+			return BLK_STS_IOERR;
 		}
 
 		SCpnt->cmnd[1] |= (unsigned char) ((block >> 16) & 0x1f);
@@ -1263,12 +1257,10 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 	 * This indicates that the command is ready from our end to be
 	 * queued.
 	 */
-	ret = BLKPREP_OK;
- out:
-	return ret;
+	return BLK_STS_OK;
 }
 
-static int sd_init_command(struct scsi_cmnd *cmd)
+static blk_status_t sd_init_command(struct scsi_cmnd *cmd)
 {
 	struct request *rq = cmd->request;
 
@@ -1284,7 +1276,7 @@ static int sd_init_command(struct scsi_cmnd *cmd)
 		case SD_LBP_ZERO:
 			return sd_setup_write_same10_cmnd(cmd, false);
 		default:
-			return BLKPREP_INVALID;
+			return BLK_STS_TARGET;
 		}
 	case REQ_OP_WRITE_ZEROES:
 		return sd_setup_write_zeroes_cmnd(cmd);
@@ -1295,13 +1287,11 @@ static int sd_init_command(struct scsi_cmnd *cmd)
 	case REQ_OP_READ:
 	case REQ_OP_WRITE:
 		return sd_setup_read_write_cmnd(cmd);
-	case REQ_OP_ZONE_REPORT:
-		return sd_zbc_setup_report_cmnd(cmd);
 	case REQ_OP_ZONE_RESET:
 		return sd_zbc_setup_reset_cmnd(cmd);
 	default:
 		WARN_ON_ONCE(1);
-		return BLKPREP_KILL;
+		return BLK_STS_NOTSUPP;
 	}
 }
 
@@ -1830,6 +1820,7 @@ static const struct block_device_operations sd_fops = {
 #endif
 	.revalidate_disk	= sd_revalidate_disk,
 	.unlock_native_capacity	= sd_unlock_native_capacity,
+	.report_zones		= sd_zbc_report_zones,
 	.pr_ops			= &sd_pr_ops,
 };
 
@@ -1975,20 +1966,6 @@ static int sd_done(struct scsi_cmnd *SCpnt)
 	case REQ_OP_ZONE_RESET:
 		if (!result) {
 			good_bytes = blk_rq_bytes(req);
-			scsi_set_resid(SCpnt, 0);
-		} else {
-			good_bytes = 0;
-			scsi_set_resid(SCpnt, blk_rq_bytes(req));
-		}
-		break;
-	case REQ_OP_ZONE_REPORT:
-		/* To avoid that the block layer performs an incorrect
-		 * bio_advance() call and restart of the remainder of
-		 * incomplete report zone BIOs, always indicate a full
-		 * completion of REQ_OP_ZONE_REPORT.
-		 */
-		if (!result) {
-			good_bytes = scsi_bufflen(SCpnt);
 			scsi_set_resid(SCpnt, 0);
 		} else {
 			good_bytes = 0;
@@ -3469,7 +3446,7 @@ static void sd_probe_async(void *data, async_cookie_t cookie)
 		msleep(500);
 	}
 #endif
-	device_add_disk(dev, gd);
+	device_add_disk(dev, gd, NULL);
 #ifdef CONFIG_USB_STORAGE_DETECT
 	sdkp->prv_media_present = sdkp->media_present;
 #endif
@@ -3726,8 +3703,6 @@ static int sd_remove(struct device *dev)
 	del_gendisk(sdkp->disk);
 	sd_shutdown(dev);
 
-	sd_zbc_remove(sdkp);
-
 	free_opal_dev(sdkp->opal_dev);
 
 	blk_register_region(devt, SD_MINORS, NULL,
@@ -3819,9 +3794,6 @@ static int sd_start_stop_device(struct scsi_disk *sdkp, int start)
 static void sd_shutdown(struct device *dev)
 {
 	struct scsi_disk *sdkp = dev_get_drvdata(dev);
-	struct scsi_device *sdp = to_scsi_device(dev);
-	struct request_queue *q = sdp->request_queue;
-	unsigned long flags;
 
 	if (!sdkp)
 		return;         /* this can happen */
@@ -3837,14 +3809,6 @@ static void sd_shutdown(struct device *dev)
 	if (system_state != SYSTEM_RESTART && sdkp->device->manage_start_stop) {
 		sd_printk(KERN_NOTICE, sdkp, "Stopping disk\n");
 		sd_start_stop_device(sdkp, 0);
-	}
-
-	if (sdp->host->by_ufs) {
-		spin_lock_irqsave(q->queue_lock, flags);
-		queue_flag_set(QUEUE_FLAG_DYING, q);
-		__blk_drain_queue(q, true);
-		queue_flag_set(QUEUE_FLAG_DEAD, q);
-		spin_unlock_irqrestore(q->queue_lock, flags);
 	}
 }
 

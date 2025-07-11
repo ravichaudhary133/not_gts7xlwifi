@@ -821,7 +821,7 @@ sg_common_write(Sg_fd * sfp, Sg_request * srp,
 	if (atomic_read(&sdp->detaching)) {
 		if (srp->bio) {
 			scsi_req_free_cmd(scsi_req(srp->rq));
-			blk_end_request_all(srp->rq, BLK_STS_IOERR);
+			blk_put_request(srp->rq);
 			srp->rq = NULL;
 		}
 
@@ -1394,7 +1394,7 @@ sg_rq_end_io(struct request *rq, blk_status_t status)
 	 */
 	srp->rq = NULL;
 	scsi_req_free_cmd(scsi_req(rq));
-	__blk_put_request(rq->q, rq);
+	blk_put_request(rq);
 
 	write_lock_irqsave(&sfp->rq_list_lock, iflags);
 	if (unlikely(srp->orphan)) {

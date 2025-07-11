@@ -673,7 +673,7 @@ static int virtblk_map_queues(struct blk_mq_tag_set *set)
 {
 	struct virtio_blk *vblk = set->driver_data;
 
-	return blk_mq_virtio_map_queues(set, vblk->vdev, 0);
+	return blk_mq_virtio_map_queues(&set->map[0], vblk->vdev, 0);
 }
 
 #ifdef CONFIG_VIRTIO_BLK_SCSI
@@ -866,7 +866,7 @@ static int virtblk_probe(struct virtio_device *vdev)
 	virtblk_update_capacity(vblk, false);
 	virtio_device_ready(vdev);
 
-	device_add_disk(&vdev->dev, vblk->disk);
+	device_add_disk(&vdev->dev, vblk->disk, NULL);
 	err = device_create_file(disk_to_dev(vblk->disk), &dev_attr_serial);
 	if (err)
 		goto out_del_disk;

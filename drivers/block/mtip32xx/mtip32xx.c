@@ -2723,7 +2723,7 @@ static void mtip_softirq_done_fn(struct request *rq)
 	blk_mq_end_request(rq, cmd->status);
 }
 
-static void mtip_abort_cmd(struct request *req, void *data, bool reserved)
+static bool mtip_abort_cmd(struct request *req, void *data, bool reserved)
 {
 	struct mtip_cmd *cmd = blk_mq_rq_to_pdu(req);
 	struct driver_data *dd = data;
@@ -2733,14 +2733,16 @@ static void mtip_abort_cmd(struct request *req, void *data, bool reserved)
 	clear_bit(req->tag, dd->port->cmds_to_issue);
 	cmd->status = BLK_STS_IOERR;
 	mtip_softirq_done_fn(req);
+	return true;
 }
 
-static void mtip_queue_cmd(struct request *req, void *data, bool reserved)
+static bool mtip_queue_cmd(struct request *req, void *data, bool reserved)
 {
 	struct driver_data *dd = data;
 
 	set_bit(req->tag, dd->port->cmds_to_issue);
 	blk_abort_request(req);
+	return true;
 }
 
 /*
@@ -2806,10 +2808,7 @@ restart_eh:
 
 			blk_mq_quiesce_queue(dd->queue);
 
-			spin_lock(dd->queue->queue_lock);
-			blk_mq_tagset_busy_iter(&dd->tags,
-							mtip_queue_cmd, dd);
-			spin_unlock(dd->queue->queue_lock);
+			blk_mq_tagset_busy_iter(&dd->tags, mtip_queue_cmd, dd);
 
 			set_bit(MTIP_PF_ISSUE_CMDS_BIT, &dd->port->flags);
 
@@ -3861,7 +3860,7 @@ skip_create_disk:
 	set_capacity(dd->disk, capacity);
 
 	/* Enable the block device and add it to /dev */
-	device_add_disk(&dd->pdev->dev, dd->disk);
+	device_add_disk(&dd->pdev->dev, dd->disk, NULL);
 
 	dd->bdev = bdget_disk(dd->disk, 0);
 	/*
@@ -3923,12 +3922,13 @@ protocol_init_error:
 	return rv;
 }
 
-static void mtip_no_dev_cleanup(struct request *rq, void *data, bool reserv)
+static bool mtip_no_dev_cleanup(struct request *rq, void *data, bool reserv)
 {
 	struct mtip_cmd *cmd = blk_mq_rq_to_pdu(rq);
 
 	cmd->status = BLK_STS_IOERR;
 	blk_mq_complete_request(rq);
+	return true;
 }
 
 /*

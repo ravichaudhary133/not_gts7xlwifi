@@ -125,9 +125,6 @@ struct blkcg_gq {
 	/* all non-root blkcg_gq's are guaranteed to have access to parent */
 	struct blkcg_gq			*parent;
 
-	/* request allocation list for this blkcg-q pair */
-	struct request_list		rl;
-
 	/* reference count */
 	atomic_t			refcnt;
 
@@ -233,22 +230,103 @@ int blkg_conf_prep(struct blkcg *blkcg, const struct blkcg_policy *pol,
 		   char *input, struct blkg_conf_ctx *ctx);
 void blkg_conf_finish(struct blkg_conf_ctx *ctx);
 
+/**
+ * blkcg_css - find the current css
+ *
+ * Find the css associated with either the kthread or the current task.
+ * This may return a dying css, so it is up to the caller to use tryget logic
+ * to confirm it is alive and well.
+ */
+static inline struct cgroup_subsys_state *blkcg_css(void)
+{
+	struct cgroup_subsys_state *css;
+
+	css = kthread_blkcg();
+	if (css)
+		return css;
+	return task_css(current, io_cgrp_id);
+}
+
+/**
+ * blkcg_get_css - find and get a reference to the css
+ *
+ * Find the css associated with either the kthread or the current task.
+ * This takes a reference on the blkcg which will need to be managed by the
+ * caller.
+ */
+static inline struct cgroup_subsys_state *blkcg_get_css(void)
+{
+	struct cgroup_subsys_state *css;
+
+	rcu_read_lock();
+
+	css = kthread_blkcg();
+	if (css) {
+		css_get(css);
+	} else {
+		/*
+		 * This is a bit complicated.  It is possible task_css() is
+		 * seeing an old css pointer here.  This is caused by the
+		 * current thread migrating away from this cgroup and this
+		 * cgroup dying.  css_tryget() will fail when trying to take a
+		 * ref on a cgroup that's ref count has hit 0.
+		 *
+		 * Therefore, if it does fail, this means current must have
+		 * been swapped away already and this is waiting for it to
+		 * propagate on the polling cpu.  Hence the use of cpu_relax().
+		 */
+		while (true) {
+			css = task_css(current, io_cgrp_id);
+			if (likely(css_tryget(css)))
+				break;
+			cpu_relax();
+		}
+	}
+
+	rcu_read_unlock();
+
+	return css;
+}
 
 static inline struct blkcg *css_to_blkcg(struct cgroup_subsys_state *css)
 {
 	return css ? container_of(css, struct blkcg, css) : NULL;
 }
 
-static inline struct blkcg *bio_blkcg(struct bio *bio)
+/**
+ * __bio_blkcg - internal, inconsistent version to get blkcg
+ *
+ * DO NOT USE.
+ * This function is inconsistent and consequently is dangerous to use.  The
+ * first part of the function returns a blkcg where a reference is owned by the
+ * bio.  This means it does not need to be rcu protected as it cannot go away
+ * with the bio owning a reference to it.  However, the latter potentially gets
+ * it from task_css().  This can race against task migration and the cgroup
+ * dying.  It is also semantically different as it must be called rcu protected
+ * and is susceptible to failure when trying to get a reference to it.
+ * Therefore, it is not ok to assume that *_get() will always succeed on the
+ * blkcg returned here.
+ */
+static inline struct blkcg *__bio_blkcg(struct bio *bio)
 {
-	struct cgroup_subsys_state *css;
-
 	if (bio && bio->bi_css)
 		return css_to_blkcg(bio->bi_css);
-	css = kthread_blkcg();
-	if (css)
-		return css_to_blkcg(css);
-	return css_to_blkcg(task_css(current, io_cgrp_id));
+	return css_to_blkcg(blkcg_css());
+}
+
+/**
+ * bio_blkcg - grab the blkcg associated with a bio
+ * @bio: target bio
+ *
+ * This returns the blkcg associated with a bio, %NULL if not associated.
+ * Callers are expected to either handle %NULL or know association has been
+ * done prior to calling this.
+ */
+static inline struct blkcg *bio_blkcg(struct bio *bio)
+{
+	if (bio && bio->bi_css)
+		return css_to_blkcg(bio->bi_css);
+	return NULL;
 }
 
 static inline bool blk_cgroup_congested(void)
@@ -331,16 +409,12 @@ static inline struct blkcg_gq *__blkg_lookup(struct blkcg *blkcg,
  * @q: request_queue of interest
  *
  * Lookup blkg for the @blkcg - @q pair.  This function should be called
- * under RCU read lock and is guaranteed to return %NULL if @q is bypassing
- * - see blk_queue_bypass_start() for details.
+ * under RCU read loc.
  */
 static inline struct blkcg_gq *blkg_lookup(struct blkcg *blkcg,
 					   struct request_queue *q)
 {
 	WARN_ON_ONCE(!rcu_read_lock_held());
-
-	if (unlikely(blk_queue_bypass(q)))
-		return NULL;
 	return __blkg_lookup(blkcg, q, false);
 }
 
@@ -517,94 +591,6 @@ static inline void blkg_put(struct blkcg_gq *blkg)
 	css_for_each_descendant_post((pos_css), &(p_blkg)->blkcg->css)	\
 		if (((d_blkg) = __blkg_lookup(css_to_blkcg(pos_css),	\
 					      (p_blkg)->q, false)))
-
-/**
- * blk_get_rl - get request_list to use
- * @q: request_queue of interest
- * @bio: bio which will be attached to the allocated request (may be %NULL)
- *
- * The caller wants to allocate a request from @q to use for @bio.  Find
- * the request_list to use and obtain a reference on it.  Should be called
- * under queue_lock.  This function is guaranteed to return non-%NULL
- * request_list.
- */
-static inline struct request_list *blk_get_rl(struct request_queue *q,
-					      struct bio *bio)
-{
-	struct blkcg *blkcg;
-	struct blkcg_gq *blkg;
-
-	rcu_read_lock();
-
-	blkcg = bio_blkcg(bio);
-
-	/* bypass blkg lookup and use @q->root_rl directly for root */
-	if (blkcg == &blkcg_root)
-		goto root_rl;
-
-	/*
-	 * Try to use blkg->rl.  blkg lookup may fail under memory pressure
-	 * or if either the blkcg or queue is going away.  Fall back to
-	 * root_rl in such cases.
-	 */
-	blkg = blkg_lookup(blkcg, q);
-	if (unlikely(!blkg))
-		goto root_rl;
-
-	blkg_get(blkg);
-	rcu_read_unlock();
-	return &blkg->rl;
-root_rl:
-	rcu_read_unlock();
-	return &q->root_rl;
-}
-
-/**
- * blk_put_rl - put request_list
- * @rl: request_list to put
- *
- * Put the reference acquired by blk_get_rl().  Should be called under
- * queue_lock.
- */
-static inline void blk_put_rl(struct request_list *rl)
-{
-	if (rl->blkg->blkcg != &blkcg_root)
-		blkg_put(rl->blkg);
-}
-
-/**
- * blk_rq_set_rl - associate a request with a request_list
- * @rq: request of interest
- * @rl: target request_list
- *
- * Associate @rq with @rl so that accounting and freeing can know the
- * request_list @rq came from.
- */
-static inline void blk_rq_set_rl(struct request *rq, struct request_list *rl)
-{
-	rq->rl = rl;
-}
-
-/**
- * blk_rq_rl - return the request_list a request came from
- * @rq: request of interest
- *
- * Return the request_list @rq is allocated from.
- */
-static inline struct request_list *blk_rq_rl(struct request *rq)
-{
-	return rq->rl;
-}
-
-struct request_list *__blk_queue_next_rl(struct request_list *rl,
-					 struct request_queue *q);
-/**
- * blk_queue_for_each_rl - iterate through all request_lists of a request_queue
- *
- * Should be used under queue_lock.
- */
-#define blk_queue_for_each_rl(rl, q)	\
-	for ((rl) = &(q)->root_rl; (rl); (rl) = __blk_queue_next_rl((rl), (q)))
 
 static inline int blkg_stat_init(struct blkg_stat *stat, gfp_t gfp)
 {
@@ -808,10 +794,10 @@ static inline bool blkcg_bio_issue_check(struct request_queue *q,
 	bool throtl = false;
 
 	rcu_read_lock();
-	blkcg = bio_blkcg(bio);
 
 	/* associate blkcg if bio hasn't attached one */
-	bio_associate_blkcg(bio, &blkcg->css);
+	bio_associate_blkcg(bio, NULL);
+	blkcg = bio_blkcg(bio);
 
 	blkg = blkg_lookup(blkcg, q);
 	if (unlikely(!blkg)) {
@@ -948,6 +934,7 @@ static inline int blkcg_activate_policy(struct request_queue *q,
 static inline void blkcg_deactivate_policy(struct request_queue *q,
 					   const struct blkcg_policy *pol) { }
 
+static inline struct blkcg *__bio_blkcg(struct bio *bio) { return NULL; }
 static inline struct blkcg *bio_blkcg(struct bio *bio) { return NULL; }
 
 static inline struct blkg_policy_data *blkg_to_pd(struct blkcg_gq *blkg,
@@ -956,12 +943,6 @@ static inline struct blkcg_gq *pd_to_blkg(struct blkg_policy_data *pd) { return 
 static inline char *blkg_path(struct blkcg_gq *blkg) { return NULL; }
 static inline void blkg_get(struct blkcg_gq *blkg) { }
 static inline void blkg_put(struct blkcg_gq *blkg) { }
-
-static inline struct request_list *blk_get_rl(struct request_queue *q,
-					      struct bio *bio) { return &q->root_rl; }
-static inline void blk_put_rl(struct request_list *rl) { }
-static inline void blk_rq_set_rl(struct request *rq, struct request_list *rl) { }
-static inline struct request_list *blk_rq_rl(struct request *rq) { return &rq->q->root_rl; }
 
 static inline bool blkcg_bio_issue_check(struct request_queue *q,
 					 struct bio *bio) { return true; }
