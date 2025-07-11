@@ -193,6 +193,7 @@ u64 get_cpu_idle_time(unsigned int cpu, u64 *wall, int io_busy);
 int cpufreq_get_policy(struct cpufreq_policy *policy, unsigned int cpu);
 void cpufreq_update_policy(unsigned int cpu);
 bool have_governor_per_policy(void);
+bool cpufreq_supports_freq_invariance(void);
 struct kobject *get_governor_parent_kobj(struct cpufreq_policy *policy);
 void cpufreq_enable_fast_switch(struct cpufreq_policy *policy);
 void cpufreq_disable_fast_switch(struct cpufreq_policy *policy);
@@ -208,6 +209,10 @@ static inline unsigned int cpufreq_quick_get(unsigned int cpu)
 static inline unsigned int cpufreq_quick_get_max(unsigned int cpu)
 {
 	return 0;
+}
+static inline bool cpufreq_supports_freq_invariance(void)
+{
+	return false;
 }
 static inline void disable_cpufreq(void) { }
 #endif
@@ -362,8 +367,6 @@ struct cpufreq_driver {
 };
 
 /* flags */
-#define CPUFREQ_NEED_UPDATE_LIMITS	(1 << 0)	/* driver isn't removed even if
-							   all ->init() calls failed */
 #define CPUFREQ_CONST_LOOPS		(1 << 1)	/* loops_per_jiffy or other
 							   kernel "constants" aren't
 							   affected by frequency
@@ -399,6 +402,14 @@ struct cpufreq_driver {
  * set.
  */
 #define CPUFREQ_NO_AUTO_DYNAMIC_SWITCHING (1 << 6)
+
+/*
+ * Set by drivers that need to update internale upper and lower boundaries along
+ * with the target frequency and so the core and governors should also invoke
+ * the diver if the target frequency does not change, but the policy min or max
+ * may have changed.
+ */
+#define CPUFREQ_NEED_UPDATE_LIMITS		BIT(8)
 
 int cpufreq_register_driver(struct cpufreq_driver *driver_data);
 int cpufreq_unregister_driver(struct cpufreq_driver *driver_data);
@@ -973,9 +984,10 @@ static inline void sched_cpufreq_governor_change(struct cpufreq_policy *policy,
 extern void arch_freq_prepare_all(void);
 extern unsigned int arch_freq_get_on_cpu(int cpu);
 
-extern void arch_set_freq_scale(struct cpumask *cpus, unsigned long cur_freq,
+extern void arch_set_freq_scale(const struct cpumask *cpus,
+				unsigned long cur_freq,
 				unsigned long max_freq);
-extern void arch_set_max_freq_scale(struct cpumask *cpus,
+extern void arch_set_max_freq_scale(const struct cpumask *cpus,
 				    unsigned long policy_max_freq);
 
 /* the following are really really optional */
