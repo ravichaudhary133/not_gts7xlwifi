@@ -30,6 +30,7 @@
 #include <linux/smpboot.h>
 #include <linux/relay.h>
 #include <linux/slab.h>
+#include <linux/scs.h>
 #include <linux/percpu-rwsem.h>
 #include <uapi/linux/sched/types.h>
 #include <linux/cpuset.h>
@@ -544,6 +545,12 @@ static int bringup_cpu(unsigned int cpu)
 	int ret;
 
 	/*
+	 * Reset stale stack state from the last time this CPU was online.
+	 */
+	scs_task_reset(idle);
+	kasan_unpoison_task_stack(idle);
+
+	/*
 	 * Some architectures have to walk the irq descriptors to
 	 * setup the vector space for the cpu which comes online.
 	 * Prevent irq alloc/free across the bringup.
@@ -1038,7 +1045,7 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen,
 	int prev_state, ret = 0;
 	u64 start_time = 0;
 
-	if (num_online_cpus() == 1)
+	if (num_active_cpus() == 1)
 		return -EBUSY;
 
 	if (!cpu_present(cpu))

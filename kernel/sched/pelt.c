@@ -30,6 +30,42 @@
 
 #include <trace/events/sched.h>
 
+int pelt_load_avg_period = PELT32_LOAD_AVG_PERIOD;
+int pelt_load_avg_max = PELT32_LOAD_AVG_MAX;
+const u32 *pelt_runnable_avg_yN_inv = pelt32_runnable_avg_yN_inv;
+
+static int __init set_pelt(char *str)
+{
+	int rc, num;
+
+	rc = kstrtoint(str, 0, &num);
+	if (rc) {
+		pr_err("%s: kstrtoint failed. rc=%d\n", __func__, rc);
+		return 0;
+	}
+
+	switch (num) {
+	case PELT8_LOAD_AVG_PERIOD:
+		pelt_load_avg_period = PELT8_LOAD_AVG_PERIOD;
+		pelt_load_avg_max = PELT8_LOAD_AVG_MAX;
+		pelt_runnable_avg_yN_inv = pelt8_runnable_avg_yN_inv;
+		pr_info("PELT half life is set to %dms\n", num);
+		break;
+	case PELT32_LOAD_AVG_PERIOD:
+		pelt_load_avg_period = PELT32_LOAD_AVG_PERIOD;
+		pelt_load_avg_max = PELT32_LOAD_AVG_MAX;
+		pelt_runnable_avg_yN_inv = pelt32_runnable_avg_yN_inv;
+		pr_info("PELT half life is set to %dms\n", num);
+		break;
+	default:
+		pr_err("Default PELT half life is 32ms\n");
+	}
+
+	return 0;
+}
+
+early_param("pelt", set_pelt);
+
 /*
  * Approximate:
  *   val * y^n,    where y^32 ~= 0.5 (~1 scheduling period)
@@ -56,7 +92,7 @@ static u64 decay_load(u64 val, u64 n)
 		local_n %= LOAD_AVG_PERIOD;
 	}
 
-	val = mul_u64_u32_shr(val, runnable_avg_yN_inv[local_n], 32);
+	val = mul_u64_u32_shr(val, pelt_runnable_avg_yN_inv[local_n], 32);
 	return val;
 }
 
@@ -82,8 +118,6 @@ static u32 __accumulate_pelt_segments(u64 periods, u32 d1, u32 d3)
 
 	return c1 + c2 + c3;
 }
-
-#define cap_scale(v, s) ((v)*(s) >> SCHED_CAPACITY_SHIFT)
 
 /*
  * Accumulate the three separate parts of the sum; d1 the remainder

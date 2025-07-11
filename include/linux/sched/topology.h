@@ -152,7 +152,7 @@ struct sched_domain {
 	 * by attaching extra space to the end of the structure,
 	 * depending on how many CPUs the kernel has booted up with)
 	 */
-	unsigned long span[0];
+	unsigned long span[];
 };
 
 static inline struct cpumask *sched_domain_span(struct sched_domain *sd)
@@ -227,6 +227,16 @@ static inline bool cpus_share_cache(int this_cpu, int that_cpu)
 }
 
 #ifndef arch_scale_cpu_capacity
+/**
+ * arch_scale_cpu_capacity - get the capacity scale factor of a given CPU.
+ * @cpu: the CPU in question.
+ *
+ * Return: the CPU scale factor normalized against SCHED_CAPACITY_SCALE, i.e.
+ *
+ *             max_perf(cpu)
+ *      ----------------------------- * SCHED_CAPACITY_SCALE
+ *      max(max_perf(c) : c \in CPUs)
+ */
 static __always_inline
 unsigned long arch_scale_cpu_capacity(void __always_unused *sd, int cpu)
 {

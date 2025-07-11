@@ -1619,20 +1619,10 @@ static inline void check_class_changed(struct rq *rq, struct task_struct *p,
 
 void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
 {
-	const struct sched_class *class;
-
-	if (p->sched_class == rq->curr->sched_class) {
+	if (p->sched_class == rq->curr->sched_class)
 		rq->curr->sched_class->check_preempt_curr(rq, p, flags);
-	} else {
-		for_each_class(class) {
-			if (class == rq->curr->sched_class)
-				break;
-			if (class == p->sched_class) {
-				resched_curr(rq);
-				break;
-			}
-		}
-	}
+	else if (p->sched_class > rq->curr->sched_class)
+		resched_curr(rq);
 
 	/*
 	 * A queue event has occurred, and we're going to schedule.  In
@@ -4402,8 +4392,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	 * higher scheduling class, because otherwise those loose the
 	 * opportunity to pull in more work from other CPUs.
 	 */
-	if (likely((prev->sched_class == &idle_sched_class ||
-		    prev->sched_class == &fair_sched_class) &&
+	if (likely(prev->sched_class <= &fair_sched_class &&
 		   rq->nr_running == rq->cfs.h_nr_running)) {
 
 		p = fair_sched_class.pick_next_task(rq, prev, rf);
@@ -4567,6 +4556,8 @@ static void __sched notrace __schedule(bool preempt)
 		 *   is a RELEASE barrier),
 		 */
 		++*switch_count;
+
+		psi_sched_switch(prev, next, !task_on_rq_queued(prev));
 
 		trace_sched_switch(preempt, prev, next);
 #ifdef CONFIG_SCHED_INFO
@@ -4938,20 +4929,21 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 		if (!dl_prio(p->normal_prio) ||
 		    (pi_task && dl_prio(pi_task->prio) &&
 		     dl_entity_preempt(&pi_task->dl, &p->dl))) {
-			p->dl.dl_boosted = 1;
+			p->dl.pi_se = pi_task->dl.pi_se;
 			queue_flag |= ENQUEUE_REPLENISH;
-		} else
-			p->dl.dl_boosted = 0;
+		} else {
+			p->dl.pi_se = &p->dl;
+		}
 		p->sched_class = &dl_sched_class;
 	} else if (rt_prio(prio)) {
 		if (dl_prio(oldprio))
-			p->dl.dl_boosted = 0;
+			p->dl.pi_se = &p->dl;
 		if (oldprio < prio)
 			queue_flag |= ENQUEUE_HEAD;
 		p->sched_class = &rt_sched_class;
 	} else {
 		if (dl_prio(oldprio))
-			p->dl.dl_boosted = 0;
+			p->dl.pi_se = &p->dl;
 		if (rt_prio(oldprio))
 			p->rt.timeout = 0;
 		p->sched_class = &fair_sched_class;
@@ -5674,6 +5666,16 @@ err_size:
 	return -E2BIG;
 }
 
+static void get_params(struct task_struct *p, struct sched_attr *attr)
+{
+	if (task_has_dl_policy(p))
+		__getparam_dl(p, attr);
+	else if (task_has_rt_policy(p))
+		attr->sched_priority = p->rt_priority;
+	else
+		attr->sched_nice = task_nice(p);
+}
+
 /**
  * sys_sched_setscheduler - set/change the scheduler policy and RT priority
  * @pid: the pid in question.
@@ -5735,6 +5737,8 @@ SYSCALL_DEFINE3(sched_setattr, pid_t, pid, struct sched_attr __user *, uattr,
 	rcu_read_unlock();
 
 	if (likely(p)) {
+		if (attr.sched_flags & SCHED_FLAG_KEEP_PARAMS)
+			get_params(p, &attr);
 		retval = sched_setattr(p, &attr);
 		put_task_struct(p);
 	}
@@ -5883,12 +5887,8 @@ SYSCALL_DEFINE4(sched_getattr, pid_t, pid, struct sched_attr __user *, uattr,
 	kattr.sched_policy = p->policy;
 	if (p->sched_reset_on_fork)
 		kattr.sched_flags |= SCHED_FLAG_RESET_ON_FORK;
-	if (task_has_dl_policy(p))
-		__getparam_dl(p, &kattr);
-	else if (task_has_rt_policy(p))
-		kattr.sched_priority = p->rt_priority;
-	else
-		kattr.sched_nice = task_nice(p);
+	get_params(p, &kattr);
+	kattr.sched_flags &= SCHED_FLAG_ALL;
 
 #ifdef CONFIG_UCLAMP_TASK
 	kattr.sched_util_min = p->uclamp_req[UCLAMP_MIN].value;
@@ -6366,7 +6366,7 @@ again:
 	if (task_running(p_rq, p) || p->state)
 		goto out_unlock;
 
-	yielded = curr->sched_class->yield_to_task(rq, p, preempt);
+	yielded = curr->sched_class->yield_to_task(rq, p);
 	if (yielded) {
 		schedstat_inc(rq->yld_count);
 		/*
@@ -6565,10 +6565,10 @@ void sched_show_task(struct task_struct *p)
 	if (!try_get_task_stack(p))
 		return;
 
-	printk(KERN_INFO "%-15.15s %c", p->comm, task_state_to_char(p));
+	pr_info("task:%-15.15s state:%c", p->comm, task_state_to_char(p));
 
 	if (p->state == TASK_RUNNING)
-		printk(KERN_CONT "  running task    ");
+		pr_cont("  running task    ");
 #ifdef CONFIG_DEBUG_STACK_USAGE
 	free = stack_not_used(p);
 #endif
@@ -6577,8 +6577,8 @@ void sched_show_task(struct task_struct *p)
 	if (pid_alive(p))
 		ppid = task_pid_nr(rcu_dereference(p->real_parent));
 	rcu_read_unlock();
-	printk(KERN_CONT "%5lu %5d %6d 0x%08lx\n", free,
-		task_pid_nr(p), ppid,
+	pr_cont(" stack:%5lu pid:%5d ppid:%6d flags:0x%08lx\n",
+		free, task_pid_nr(p), ppid,
 		(unsigned long)task_thread_info(p)->flags);
 
 	print_worker_info(KERN_INFO, p);
@@ -6613,13 +6613,6 @@ void show_state_filter(unsigned long state_filter)
 {
 	struct task_struct *g, *p;
 
-#if BITS_PER_LONG == 32
-	printk(KERN_INFO
-		"  task                PC stack   pid father\n");
-#else
-	printk(KERN_INFO
-		"  task                        PC stack   pid father\n");
-#endif
 	rcu_read_lock();
 	for_each_process_thread(g, p) {
 		/*
@@ -6668,9 +6661,6 @@ void init_idle(struct task_struct *idle, int cpu)
 	idle->state = TASK_RUNNING;
 	idle->se.exec_start = sched_clock();
 	idle->flags |= PF_IDLE;
-
-	scs_task_reset(idle);
-	kasan_unpoison_task_stack(idle);
 
 #ifdef CONFIG_SMP
 	/*
@@ -6733,7 +6723,7 @@ int cpuset_cpumask_can_shrink(const struct cpumask *cur,
 }
 
 int task_can_attach(struct task_struct *p,
-		    const struct cpumask *cs_cpus_allowed)
+		    const struct cpumask *cs_effective_cpus)
 {
 	int ret = 0;
 
@@ -6752,8 +6742,13 @@ int task_can_attach(struct task_struct *p,
 	}
 
 	if (dl_task(p) && !cpumask_intersects(task_rq(p)->rd->span,
-					      cs_cpus_allowed))
-		ret = dl_task_can_attach(p, cs_cpus_allowed);
+					      cs_effective_cpus)) {
+		int cpu = cpumask_any_and(cpu_active_mask, cs_effective_cpus);
+
+		if (unlikely(cpu >= nr_cpu_ids))
+			return -EINVAL;
+		ret = dl_cpu_busy(cpu, p);
+	}
 
 out:
 	return ret;
@@ -6930,6 +6925,11 @@ static void migrate_tasks(struct rq *dead_rq, struct rq_flags *rf,
 	 * value of rq->clock[_task]
 	 */
 	update_rq_clock(rq);
+
+#ifdef CONFIG_SCHED_DEBUG
+	/* note the clock update in orf */
+	orf.clock_update_flags |= RQCF_UPDATED;
+#endif
 
 	for (;;) {
 		/*
@@ -7300,8 +7300,10 @@ static void cpuset_cpu_active(void)
 static int cpuset_cpu_inactive(unsigned int cpu)
 {
 	if (!cpuhp_tasks_frozen) {
-		if (dl_cpu_busy(cpu))
-			return -EBUSY;
+		int ret = dl_cpu_busy(cpu, NULL);
+
+		if (ret)
+			return ret;
 		cpuset_update_active_cpus();
 	} else {
 		num_cpus_frozen++;
@@ -7510,6 +7512,14 @@ void __init sched_init(void)
 	int i, j;
 	unsigned long alloc_size = 0, ptr;
 
+	/* Make sure the linker didn't screw up */
+	BUG_ON(&idle_sched_class + 1 != &fair_sched_class ||
+	       &fair_sched_class + 1 != &rt_sched_class ||
+	       &rt_sched_class + 1   != &dl_sched_class);
+#ifdef CONFIG_SMP
+	BUG_ON(&dl_sched_class + 1 != &stop_sched_class);
+#endif
+
 	wait_bit_init();
 
 	init_clusters();
@@ -7530,6 +7540,8 @@ void __init sched_init(void)
 		root_task_group.cfs_rq = (struct cfs_rq **)ptr;
 		ptr += nr_cpu_ids * sizeof(void **);
 
+		root_task_group.shares = ROOT_TASK_GROUP_LOAD;
+		init_cfs_bandwidth(&root_task_group.cfs_bandwidth);
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 #ifdef CONFIG_RT_GROUP_SCHED
 		root_task_group.rt_se = (struct sched_rt_entity **)ptr;
@@ -7582,7 +7594,6 @@ void __init sched_init(void)
 		init_rt_rq(&rq->rt);
 		init_dl_rq(&rq->dl);
 #ifdef CONFIG_FAIR_GROUP_SCHED
-		root_task_group.shares = ROOT_TASK_GROUP_LOAD;
 		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 		rq->tmp_alone_branch = &rq->leaf_cfs_rq_list;
 		/*
@@ -7604,7 +7615,6 @@ void __init sched_init(void)
 		 * We achieve this by letting root_task_group's tasks sit
 		 * directly in rq->cfs (i.e root_task_group->se[] = NULL).
 		 */
-		init_cfs_bandwidth(&root_task_group.cfs_bandwidth);
 		init_tg_cfs_entry(&root_task_group, &rq->cfs, NULL, i, NULL);
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 
@@ -7636,7 +7646,6 @@ void __init sched_init(void)
 
 		rq_attach_root(rq, &def_root_domain);
 #ifdef CONFIG_NO_HZ_COMMON
-		rq->last_load_update_tick = jiffies;
 		rq->last_blocked_load_update_tick = jiffies;
 		atomic_set(&rq->nohz_flags, 0);
 #endif

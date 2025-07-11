@@ -245,7 +245,7 @@ static void update_sysctl(void)
 #undef SET_SYSCTL
 }
 
-void sched_init_granularity(void)
+void __init sched_init_granularity(void)
 {
 	update_sysctl();
 }
@@ -1134,7 +1134,7 @@ struct numa_group {
 	 * more by CPU use than by memory faults.
 	 */
 	unsigned long *faults_cpu;
-	unsigned long faults[0];
+	unsigned long faults[];
 };
 
 /*
@@ -3793,14 +3793,16 @@ unsigned long task_util_est(struct task_struct *p)
 }
 
 #ifdef CONFIG_UCLAMP_TASK
-static inline unsigned long uclamp_task_util(struct task_struct *p)
+static inline unsigned long uclamp_task_util(struct task_struct *p,
+					     unsigned long uclamp_min,
+					     unsigned long uclamp_max)
 {
-	return clamp(task_util_est(p),
-		     uclamp_eff_value(p, UCLAMP_MIN),
-		     uclamp_eff_value(p, UCLAMP_MAX));
+	return clamp(task_util_est(p), uclamp_min, uclamp_max);
 }
 #else
-static inline unsigned long uclamp_task_util(struct task_struct *p)
+static inline unsigned long uclamp_task_util(struct task_struct *p,
+					     unsigned long uclamp_min,
+					     unsigned long uclamp_max)
 {
 	return task_util_est(p);
 }
@@ -3824,6 +3826,8 @@ static inline void util_est_enqueue(struct cfs_rq *cfs_rq,
 	trace_sched_util_est_cpu(cpu_of(rq_of(cfs_rq)), cfs_rq);
 }
 
+#define UTIL_EST_MARGIN (SCHED_CAPACITY_SCALE / 100)
+
 /*
  * Check if a (signed) value is within a specified (unsigned) margin,
  * based on the observation that:
@@ -3840,7 +3844,7 @@ static inline bool within_margin(int value, int margin)
 static void
 util_est_dequeue(struct cfs_rq *cfs_rq, struct task_struct *p, bool task_sleep)
 {
-	long last_ewma_diff;
+	long last_ewma_diff, last_enqueued_diff;
 	struct util_est ue;
 	int cpu;
 
@@ -3871,6 +3875,8 @@ util_est_dequeue(struct cfs_rq *cfs_rq, struct task_struct *p, bool task_sleep)
 	if (ue.enqueued & UTIL_AVG_UNCHANGED)
 		return;
 
+	last_enqueued_diff = ue.enqueued;
+
 	/*
 	 * Reset EWMA on utilization increases, the moving average is used only
 	 * to smooth utilization decreases.
@@ -3884,12 +3890,17 @@ util_est_dequeue(struct cfs_rq *cfs_rq, struct task_struct *p, bool task_sleep)
 	}
 
 	/*
-	 * Skip update of task's estimated utilization when its EWMA is
+	 * Skip update of task's estimated utilization when its members are
 	 * already ~1% close to its last activation value.
 	 */
 	last_ewma_diff = ue.enqueued - ue.ewma;
-	if (within_margin(last_ewma_diff, (SCHED_CAPACITY_SCALE / 100)))
+	last_enqueued_diff -= ue.enqueued;
+	if (within_margin(last_ewma_diff, UTIL_EST_MARGIN)) {
+		if (!within_margin(last_enqueued_diff, UTIL_EST_MARGIN))
+			goto done;
+
 		return;
+	}
 
 	/*
 	 * To avoid overestimation of actual task utilization, skip updates if
@@ -3942,6 +3953,8 @@ static inline bool task_fits_capacity(struct task_struct *p,
 					int cpu)
 {
 	unsigned int margin;
+	unsigned long uclamp_min = p->uclamp_req[UCLAMP_MIN].value;
+	unsigned long uclamp_max = p->uclamp_req[UCLAMP_MAX].value;
 
 	/*
 	 * Derive upmigration/downmigrate margin wrt the src/dest CPU.
@@ -3951,7 +3964,7 @@ static inline bool task_fits_capacity(struct task_struct *p,
 	else
 		margin = sched_capacity_margin_up[task_cpu(p)];
 
-	return capacity * 1024 > uclamp_task_util(p) * margin;
+	return capacity * 1024 > uclamp_task_util(p, uclamp_min, uclamp_max) * margin;
 }
 
 static inline bool task_fits_max(struct task_struct *p, int cpu)
@@ -4523,17 +4536,17 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 			se = second;
 	}
 
-	/*
-	 * Prefer last buddy, try to return the CPU to a preempted task.
-	 */
-	if (cfs_rq->last && wakeup_preempt_entity(cfs_rq->last, left) < 1)
-		se = cfs_rq->last;
-
-	/*
-	 * Someone really wants this to run. If it's not unfair, run it.
-	 */
-	if (cfs_rq->next && wakeup_preempt_entity(cfs_rq->next, left) < 1)
+	if (cfs_rq->next && wakeup_preempt_entity(cfs_rq->next, left) < 1) {
+		/*
+		 * Someone really wants this to run. If it's not unfair, run it.
+		 */
 		se = cfs_rq->next;
+	} else if (cfs_rq->last && wakeup_preempt_entity(cfs_rq->last, left) < 1) {
+		/*
+		 * Prefer last buddy, try to return the CPU to a preempted task.
+		 */
+		se = cfs_rq->last;
+	}
 
 	clear_buddies(cfs_rq, se);
 
@@ -7783,6 +7796,9 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu,
 				     int sync, int sibling_count_hint)
 {
 	unsigned long prev_energy = ULONG_MAX, best_energy = ULONG_MAX;
+	unsigned long prev_delta = ULONG_MAX, best_delta = ULONG_MAX;
+	unsigned long p_util_min = uclamp_is_used() ? uclamp_eff_value(p, UCLAMP_MIN) : 0;
+	unsigned long p_util_max = uclamp_is_used() ? uclamp_eff_value(p, UCLAMP_MAX) : 1024;
 	struct root_domain *rd = cpu_rq(smp_processor_id())->rd;
 	int weight, cpu = smp_processor_id(), best_energy_cpu = prev_cpu;
 	unsigned long cur_energy;
@@ -7846,7 +7862,7 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu,
 		goto fail;
 
 	sync_entity_load_avg(&p->se);
-	if (!task_util_est(p))
+	if (!uclamp_task_util(p, p_util_min, p_util_max))
 		goto unlock;
 
 	if (sched_feat(FIND_BEST_TARGET)) {
@@ -8474,7 +8490,7 @@ static void yield_task_fair(struct rq *rq)
 	set_skip_buddy(se);
 }
 
-static bool yield_to_task_fair(struct rq *rq, struct task_struct *p, bool preempt)
+static bool yield_to_task_fair(struct rq *rq, struct task_struct *p)
 {
 	struct sched_entity *se = &p->se;
 
@@ -11133,6 +11149,15 @@ get_sd_balance_interval(struct sched_domain *sd, int cpu_busy)
 
 	/* scale ms to jiffies */
 	interval = msecs_to_jiffies(interval);
+
+	/*
+	 * Reduce likelihood of busy balancing at higher domains racing with
+	 * balancing at lower domains by preventing their balancing periods
+	 * from being multiples of each other.
+	 */
+	if (cpu_busy)
+		interval -= 1;
+
 	interval = clamp(interval, 1UL, max_load_balance_interval);
 
 	/*
@@ -11763,9 +11788,20 @@ void nohz_balance_enter_idle(int cpu)
 
 	SCHED_WARN_ON(cpu != smp_processor_id());
 
-	/* If this CPU is going down, then nothing needs to be done: */
-	if (!cpu_active(cpu))
+	if (!cpu_active(cpu)) {
+		/*
+		 * A CPU can be paused while it is idle with it's tick
+		 * stopped. nohz_balance_exit_idle() should be called
+		 * from the local CPU, so it can't be called during
+		 * pause. This results in paused CPU participating in
+		 * the nohz idle balance, which should be avoided.
+		 *
+		 * When the paused CPU exits idle and enters again,
+		 * exempt the paused CPU from nohz_balance_exit_idle.
+		 */
+		nohz_balance_exit_idle(rq);
 		return;
+	}
 
 #ifdef CONFIG_SONY_SCHED
 	cpumask_clear_cpu(cpu, &cpu_wclaimed_mask);
@@ -12761,8 +12797,8 @@ static inline void *select_task_rq_fair_dummy(void)
 /*
  * All the scheduling class methods:
  */
-const struct sched_class fair_sched_class = {
-	.next			= &idle_sched_class,
+const struct sched_class fair_sched_class
+	__attribute__((section("__fair_sched_class"))) = {
 	.enqueue_task		= enqueue_task_fair,
 	.dequeue_task		= dequeue_task_fair,
 	.yield_task		= yield_task_fair,
