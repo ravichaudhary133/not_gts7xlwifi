@@ -42,7 +42,6 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(pelt_dl_tp);
 EXPORT_TRACEPOINT_SYMBOL_GPL(pelt_irq_tp);
 EXPORT_TRACEPOINT_SYMBOL_GPL(pelt_se_tp);
 EXPORT_TRACEPOINT_SYMBOL_GPL(sched_overutilized_tp);
->>>>>>> 3b773b24e6767 (ANDROID: sched: add vendor hooks to handle scheduling priority)
 
 DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 
