@@ -1223,7 +1223,6 @@ static inline int cpu_of(struct rq *rq)
 #endif
 }
 
-
 #ifdef CONFIG_SCHED_SMT
 extern void __update_idle_core(struct rq *rq);
 
@@ -1476,6 +1475,11 @@ extern void sched_domains_numa_masks_clear(unsigned int cpu);
 static inline void sched_init_numa(void) { }
 static inline void sched_domains_numa_masks_set(unsigned int cpu) { }
 static inline void sched_domains_numa_masks_clear(unsigned int cpu) { }
+#endif
+
+#if defined(CONFIG_NUMA_BALANCING) || defined(CONFIG_SPRD_ROTATION_TASK)
+extern int migrate_swap(struct task_struct *p, struct task_struct *t,
+			int cpu, int scpu);
 #endif
 
 #ifdef CONFIG_NUMA_BALANCING
@@ -2831,6 +2835,8 @@ bool uclamp_boosted(struct task_struct *p);
 # define arch_scale_freq_invariant()	false
 #endif
 
+extern struct cpumask min_cap_cpu_mask;
+
 /**
  * enum schedutil_type - CPU utilization type
  * @FREQUENCY_UTIL:	Utilization used to select frequency
@@ -3175,6 +3181,26 @@ extern int alloc_related_thread_groups(void);
 
 extern void check_for_migration(struct rq *rq, struct task_struct *p);
 
+#ifdef CONFIG_SPRD_ROTATION_TASK
+DECLARE_PER_CPU_SHARED_ALIGNED(bool, cpu_reserved);
+static inline bool is_reserved(int cpu)
+{
+	return per_cpu(cpu_reserved, cpu);
+}
+
+static inline void mark_reserved(int cpu)
+{
+	per_cpu(cpu_reserved, cpu) = true;
+}
+
+static inline void clear_reserved(int cpu)
+{
+	per_cpu(cpu_reserved, cpu) = false;
+}
+
+void check_for_task_rotation(struct rq *src_rq);
+u64 sched_ktime_clock(void);
+#else
 static inline int is_reserved(int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
@@ -3195,6 +3221,7 @@ static inline void clear_reserved(int cpu)
 
 	clear_bit(CPU_RESERVED, &rq->walt_flags);
 }
+#endif
 
 static inline bool
 task_in_cum_window_demand(struct rq *rq, struct task_struct *p)

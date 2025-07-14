@@ -11081,7 +11081,13 @@ no_move:
 				*continue_balancing = 0;
 				goto out;
 			}
-
+			
+			if (is_reserved(this_cpu) ||
+				is_reserved(cpu_of(busiest))) {
+				*continue_balancing = 0;
+				goto out;
+	        	}
+	        	
 			/*
 			 * Don't kick the active_load_balance_cpu_stop,
 			 * if the curr task on busiest CPU can't be
