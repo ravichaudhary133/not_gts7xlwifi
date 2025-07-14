@@ -174,6 +174,13 @@ unsigned int sched_capacity_margin_down[NR_CPUS] = {
 			1024, 1024, 1024, 1024, 1796, 1796, 1796, 1442
 }; /* Not used for small, ~43% margin for big, ~29% for prime */
 
+/*
+ * The margin used when comparing utilization with CPU capacity.
+ *
+ * (default: ~20%)
+ */
+#define fits_capacity(cap, max)	((cap) * 1280 < (max) * 1024)
+
 #ifdef CONFIG_SCHED_WALT
 /* 1ms default for 20ms window size scaled to 1024 */
 unsigned int sysctl_sched_min_task_util_for_boost = 51;
@@ -13350,3 +13357,6 @@ void check_for_migration(struct rq *rq, struct task_struct *p)
 }
 
 #endif /* CONFIG_SCHED_WALT */
+#ifdef CONFIG_SPRD_ROTATION_TASK
+#include "sprd_rotation.c"
+#endif
