@@ -332,10 +332,6 @@ bool ksu_is_manager_apk(char *path)
 		pr_info("%s: timeout for %s\n", __func__, path);
 		return false;
 	}
-#ifdef CONFIG_KSU_SUSFS
-	return (check_v2_signature(path, EXPECTED_NEXT_SIZE, EXPECTED_NEXT_HASH) ||
-check_v2_signature(path, 9413036, "fa50e8c17098b8c7d6f10b96d74b9af1ec3dbcfb386ca56a2b38896d22ab9621"));
-#else
+
 	return check_v2_signature(path, EXPECTED_NEXT_SIZE, EXPECTED_NEXT_HASH);
-#endif
 }
