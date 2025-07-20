@@ -390,7 +390,7 @@ u64 approximate_runtime(unsigned long util);
  */
 static inline bool dl_task_fits_capacity(struct task_struct *p, int cpu)
 {
-	unsigned long cap = arch_scale_cpu_capacity(NULL, cpu);
+	unsigned long cap = arch_scale_cpu_capacity(cpu);
 
 	return cap_scale(p->dl.dl_deadline, cap) >= p->dl.dl_runtime;
 }
