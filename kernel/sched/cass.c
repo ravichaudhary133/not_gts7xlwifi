@@ -40,7 +40,7 @@ unsigned long cass_cpu_util(int cpu, bool sync)
 
 	/* Deduct @current's util from this CPU if this is a sync wake */
 	if (sync && cpu == smp_processor_id())
-		sub_positive(&util, task_util(current));
+		lsub_positive(&util, task_util(current));
 
 	if (sched_feat(UTIL_EST))
 		util = max_t(unsigned long, util,
@@ -100,7 +100,9 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 	int cidx = 0, cpu;
 
 	/* Get the utilization for this task */
-	p_util = task_util_est(p);
+	p_util = clamp(task_util_est(p),
+		       uclamp_eff_value(p, UCLAMP_MIN),
+		       uclamp_eff_value(p, UCLAMP_MAX));
 
 	/*
 	 * Find the best CPU to wake @p on. Although idle_get_state() requires
@@ -113,17 +115,17 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 	 * otherwise, if only one CPU is allowed and it is skipped before
 	 * @curr->cpu is set, then @best->cpu will be garbage.
 	 */
-	rcu_read_lock();
-	for_each_cpu_and(cpu, &p->cpus_allowed, cpu_active_mask) {
-	        /* Use the free candidate slot for @curr */
+	for_each_cpu_and(cpu, p->cpus_ptr, cpu_active_mask) {
+		/* Use the free candidate slot for @curr */
 		struct cass_cpu_cand *curr = &cands[cidx];
 		struct cpuidle_state *idle_state;
 
 		/*
-		 * Check if this CPU is idle. For sync wakes, always treat the
-		 * current CPU as idle.
+		 * Check if this CPU is idle or only has SCHED_IDLE tasks. For
+		 * sync wakes, always treat the current CPU as idle.
 		 */
-		if ((sync && cpu == smp_processor_id()) || idle_cpu(cpu)) {
+		if ((sync && cpu == smp_processor_id()) ||
+		    available_idle_cpu(cpu) || sched_idle_cpu(cpu)) {
 			/* Discard any previous non-idle candidate */
 			if (!has_idle)
 				best = curr;
@@ -177,7 +179,6 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 			cidx ^= 1;
 		}
 	}
-	rcu_read_unlock();
 
 	return best->cpu;
 }
@@ -197,8 +198,8 @@ static int cass_select_task_rq_fair(struct task_struct *p, int prev_cpu,
 	 * first valid CPU since it's possible for certain types of tasks to run
 	 * on inactive CPUs.
 	 */
-	if (unlikely(!cpumask_intersects(&p->cpus_allowed, cpu_active_mask)))
-		return cpumask_first(&p->cpus_allowed);
+	if (unlikely(!cpumask_intersects(p->cpus_ptr, cpu_active_mask)))
+		return cpumask_first(p->cpus_ptr);
 
 	/* cass_best_cpu() needs the task's utilization, so sync it up */
 	if (!(sd_flag & SD_BALANCE_FORK))
