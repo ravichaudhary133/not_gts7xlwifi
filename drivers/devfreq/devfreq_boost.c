@@ -70,13 +70,17 @@ static struct df_boost_drv df_boost_drv_g __read_mostly = {
 		       CONFIG_DEVFREQ_MSM_CPU4_LLCC_DDR_LAT_BOOST_FREQ)
 };
 
+#ifdef KPROFILES
 extern int kp_active_mode(void);
+#endif
+
 unsigned long last_input_time;
 
 static void __devfreq_boost_kick(struct boost_dev *b)
 {
 	unsigned int period = CONFIG_DEVFREQ_INPUT_BOOST_DURATION_MS;
 
+#ifdef KPROFILES
 	if (!READ_ONCE(b->df) || test_bit(SCREEN_OFF, &b->state) || kp_active_mode() == 1)
 		return;
 
@@ -88,7 +92,8 @@ static void __devfreq_boost_kick(struct boost_dev *b)
 		period = CONFIG_DEVFREQ_INPUT_BOOST_DURATION_MS * 2;
 		break;
 	}
-	
+#endif
+
 	set_bit(INPUT_BOOST, &b->state);
 	if (!mod_delayed_work(system_unbound_wq, &b->input_unboost,
 		msecs_to_jiffies(period)))
@@ -107,10 +112,10 @@ static void __devfreq_boost_kick_max(struct boost_dev *b,
 {
 	unsigned long boost_jiffies = msecs_to_jiffies(duration_ms);
 	unsigned long curr_expires, new_expires;
-
+#ifdef KPROFILES
 	if (!READ_ONCE(b->df) || test_bit(SCREEN_OFF, &b->state) || kp_active_mode() == 1)
 		return;
-
+#endif
 	do {
 		curr_expires = atomic_long_read(&b->max_boost_expires);
 		new_expires = jiffies + boost_jiffies;
