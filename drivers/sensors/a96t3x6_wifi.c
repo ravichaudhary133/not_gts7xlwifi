@@ -59,6 +59,8 @@
 #include <linux/input/pogo_i2c_notifier.h>
 #endif
 
+#define INIT_DELAY 5000  // for example, 5ms delay
+
 //#define DEBUG_FACTORY_APP_ENABLE
 
 #define COUNTRY_KOR 1
