@@ -1,0 +1,48 @@
+/* Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 and
+ * only version 2 as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
+                        /* placeholder dtsi */
+
+		/* The device number should be assigned for each device, e.g. "boot_device@1" and "boot_device@2".
+		 * Duplicated number is not allowed. Please refer the below example.
+		 */
+		/* Table Format should be
+		 * <Throughput(Mbps) ARM_min ARM_max Little_min Little_max BIMC1 BIMC1 Task IRQ SCHED_boost>
+		 * ARM_min : Big Core's minimum frequency lock. 0 means not set,
+		 * ARM_max : Big Core's maximum frequency lock. 0 means not set,
+		 * Little_min : Little Core's minimum frequency lock. 0 means not set,
+		 * Little_max : Little Core's maximum frequency lock. 0 means not set,
+		 * BIMC1 : Memory frequency lock. 0 means not set,(not used now)
+		 * BIMC2 : Memory frequency lock. 0 means not set, (not used now)
+		 * Task : 1 - Set task affinity lock.
+		 *	0 - Not set or unlock,
+		 *		Task affinity should be predefined driver's code.
+		 * IRQ : 1 - Set irq affinity lock.
+		 *       0 - Not set or unlock,
+		 *		Task affinity should be predefined driver's code.
+		 * SCHED_boost : 1 - Increase sched boosting count (not used now)
+		 *             0 - Decrease sched boosting count
+		 */
+		/*
+		 *boot_device@1 {
+		 *		net_boost,label="WIFI";
+		 *		net_boost,node="wlan0";
+		 *		net_boost,table_size = <3>;
+		 *		net_boost,table= <
+		 *			5  2016000 0 2016000 0 0 0 0 0 0
+		 *			10  2016000 0 2016000 0 0 0 0 0 0
+		 *			20  2016000 0 2016000 0 0 0 0 0 0
+		 *			30  2016000 0 2016000 0 0 0 0 0 0
+		 *			>;
+		 * };
+		 */
+	      
