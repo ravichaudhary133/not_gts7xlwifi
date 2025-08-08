@@ -36,6 +36,7 @@
 #include <uapi/linux/sched/types.h>
 
 #include <linux/binfmts.h>
+#include <linux/bitops.h>
 #include <linux/blkdev.h>
 #include <linux/compat.h>
 #include <linux/context_tracking.h>
@@ -541,6 +542,7 @@ extern void __refill_cfs_bandwidth_runtime(struct cfs_bandwidth *cfs_b);
 extern void start_cfs_bandwidth(struct cfs_bandwidth *cfs_b);
 extern void unthrottle_cfs_rq(struct cfs_rq *cfs_rq);
 
+extern void unregister_rt_sched_group(struct task_group *tg);
 extern void free_rt_sched_group(struct task_group *tg);
 extern int alloc_rt_sched_group(struct task_group *tg, struct task_group *parent);
 extern void init_tg_rt_entry(struct task_group *tg, struct rt_rq *rt_rq,
@@ -556,7 +558,7 @@ extern struct task_group *sched_create_group(struct task_group *parent);
 extern void sched_online_group(struct task_group *tg,
 			       struct task_group *parent);
 extern void sched_destroy_group(struct task_group *tg);
-extern void sched_offline_group(struct task_group *tg);
+extern void sched_release_group(struct task_group *tg);
 
 extern void sched_move_task(struct task_struct *tsk);
 
@@ -825,6 +827,12 @@ struct dl_rq {
 #else
 #define entity_is_task(se)	1
 #endif
+
+#ifdef CONFIG_RT_GROUP_SCHED
+#define rt_entity_is_task(rt_se) (!(rt_se)->my_q)
+#else /* CONFIG_RT_GROUP_SCHED */
+#define rt_entity_is_task(rt_se) (1)
+#endif /* CONFIG_RT_GROUP_SCHED */
 
 #ifdef CONFIG_SMP
 /*
@@ -3226,7 +3234,7 @@ static inline void clear_reserved(int cpu)
 	per_cpu(cpu_reserved, cpu) = false;
 }
 
-void check_for_task_rotation(struct rq *src_rq);
+void check_for_task_rotation(struct rq *src_rq, int cpu);
 u64 sched_ktime_clock(void);
 #else
 static inline int is_reserved(int cpu)

@@ -1074,6 +1074,84 @@ static inline void uclamp_rq_dec_id(struct rq *rq, struct task_struct *p,
 	}
 }
 
+static inline void uclamp_rq_bucket_update(struct rq *rq, struct task_struct *p,
+				    enum uclamp_id clamp_id)
+{
+	struct uclamp_rq *uc_rq = &rq->uclamp[clamp_id];
+	struct uclamp_se *uc_se = &p->uclamp[clamp_id];
+	struct uclamp_bucket *bucket;
+	unsigned int rq_clamp, bucket_value;
+	struct task_struct *t;
+
+	bucket = &uc_rq->bucket[uc_se->bucket_id];
+	bucket_value = bucket->value;
+	rq_clamp = READ_ONCE(uc_rq->value);
+
+	/* the four cases is no need to update:
+	 * 1. the bucket's task is 0;
+	 * 2. the dequeue task is the last in rq;
+	 * 3. the dequeue task's uclamp value is not the biggest value;
+	 * 4. the dequeue task's uclamp_min is 0.
+	 */
+	if (bucket->tasks == 0 || rq->nr_running == 1 ||
+	    bucket_value != uc_se->value || uc_se->value == 0)
+		return;
+
+	bucket_value = UCLAMP_BUCKET_DELTA * uclamp_bucket_id(uc_se->value);
+	/* search for all cfs tasks */
+	list_for_each_entry(t, &rq->cfs_tasks, se.group_node) {
+		struct uclamp_se *uc_se_t = &t->uclamp[clamp_id];
+
+		if (t == p || uc_se_t->bucket_id != uc_se->bucket_id)
+			continue;
+		/* if the task's clamp is equal to p's clamp, the task's clamp
+		 * is the biggest, so the rq is no need to update, just return.
+		 */
+		if (uc_se_t->value == uc_se->value)
+			return;
+
+		if (uc_se_t->value > bucket_value)
+			bucket_value = uc_se_t->value;
+	}
+
+	if (rq->rt.rt_nr_running > 0) {
+		struct rt_prio_array *array = &rq->rt.active;
+		struct sched_rt_entity *rt_se = NULL;
+		struct list_head *queue;
+		int idx;
+
+		if (rq->rt.rt_nr_running == 1 && rt_task(p))
+			goto out;
+		for_each_set_bit(idx, array->bitmap, MAX_RT_PRIO) {
+			if (WARN_ON_ONCE(idx >= MAX_RT_PRIO))
+				goto out;
+
+			queue = array->queue + idx;
+			list_for_each_entry(rt_se, queue, run_list) {
+				if (rt_entity_is_task(rt_se)) {
+					struct uclamp_se *uc_se_t;
+
+					t = container_of(rt_se, struct task_struct, rt);
+					uc_se_t = &t->uclamp[clamp_id];
+
+					if (t == p || uc_se_t->bucket_id != uc_se->bucket_id)
+						continue;
+					if (uc_se_t->value == uc_se->value)
+						return;
+					if (uc_se_t->value > bucket_value)
+						bucket_value = uc_se_t->value;
+				}
+			}
+
+		}
+	}
+out:
+	if (rq_clamp == bucket->value)
+		WRITE_ONCE(uc_rq->value, bucket_value);
+
+	bucket->value = bucket_value;
+}
+
 static inline void uclamp_rq_inc(struct rq *rq, struct task_struct *p)
 {
 	enum uclamp_id clamp_id;
@@ -1114,8 +1192,10 @@ static inline void uclamp_rq_dec(struct rq *rq, struct task_struct *p)
 	if (unlikely(!p->sched_class->uclamp_enabled))
 		return;
 
-	for_each_clamp_id(clamp_id)
+	for_each_clamp_id(clamp_id) {
 		uclamp_rq_dec_id(rq, p, clamp_id);
+		uclamp_rq_bucket_update(rq, p, clamp_id);
+	}
 }
 
 static inline void uclamp_rq_reinc_id(struct rq *rq, struct task_struct *p,
@@ -4234,7 +4314,7 @@ void scheduler_tick(void)
 		if (rq->misfit_task_load && READ_ONCE(curr->state) == TASK_RUNNING &&
 		    cpumask_test_cpu(cpu, &min_cap_cpu_mask)) {
 			raw_spin_lock(&rotation_lock);
-			check_for_task_rotation(rq);
+			check_for_task_rotation(rq, cpu);
 			raw_spin_unlock(&rotation_lock);
 		}
 	}
@@ -8080,6 +8160,22 @@ static void sched_free_group(struct task_group *tg)
 	kmem_cache_free(task_group_cache, tg);
 }
 
+static void sched_free_group_rcu(struct rcu_head *rcu)
+{
+	sched_free_group(container_of(rcu, struct task_group, rcu));
+}
+
+static void sched_unregister_group(struct task_group *tg)
+{
+	unregister_fair_sched_group(tg);
+	unregister_rt_sched_group(tg);
+	/*
+	 * We have to wait for yet another RCU grace period to expire, as
+	 * print_cfs_stats() might run concurrently.
+	 */
+	call_rcu(&tg->rcu, sched_free_group_rcu);
+}
+
 /* allocate runqueue etc for a new task group */
 struct task_group *sched_create_group(struct task_group *parent)
 {
@@ -8123,25 +8219,35 @@ void sched_online_group(struct task_group *tg, struct task_group *parent)
 }
 
 /* rcu callback to free various structures associated with a task group */
-static void sched_free_group_rcu(struct rcu_head *rhp)
+static void sched_unregister_group_rcu(struct rcu_head *rhp)
 {
 	/* Now it should be safe to free those cfs_rqs: */
-	sched_free_group(container_of(rhp, struct task_group, rcu));
+	sched_unregister_group(container_of(rhp, struct task_group, rcu));
 }
 
 void sched_destroy_group(struct task_group *tg)
 {
 	/* Wait for possible concurrent references to cfs_rqs complete: */
-	call_rcu(&tg->rcu, sched_free_group_rcu);
+	call_rcu(&tg->rcu, sched_unregister_group_rcu);
 }
 
-void sched_offline_group(struct task_group *tg)
+void sched_release_group(struct task_group *tg)
 {
 	unsigned long flags;
 
-	/* End participation in shares distribution: */
-	unregister_fair_sched_group(tg);
-
+	/*
+	 * Unlink first, to avoid walk_tg_tree_from() from finding us (via
+	 * sched_cfs_period_timer()).
+	 *
+	 * For this to be effective, we have to wait for all pending users of
+	 * this task group to leave their RCU critical section to ensure no new
+	 * user will see our dying task group any more. Specifically ensure
+	 * that tg_unthrottle_up() won't add decayed cfs_rq's to it.
+	 *
+	 * We therefore defer calling unregister_fair_sched_group() to
+	 * sched_unregister_group() which is guarantied to get called only after the
+	 * current RCU grace period has expired.
+	 */
 	spin_lock_irqsave(&task_group_lock, flags);
 	list_del_rcu(&tg->list);
 	list_del_rcu(&tg->siblings);
@@ -8267,7 +8373,7 @@ static void cpu_cgroup_css_released(struct cgroup_subsys_state *css)
 {
 	struct task_group *tg = css_tg(css);
 
-	sched_offline_group(tg);
+	sched_release_group(tg);
 }
 
 static void cpu_cgroup_css_free(struct cgroup_subsys_state *css)
@@ -8277,7 +8383,7 @@ static void cpu_cgroup_css_free(struct cgroup_subsys_state *css)
 	/*
 	 * Relies on the RCU grace period between css_released() and this.
 	 */
-	sched_free_group(tg);
+	sched_unregister_group(tg);
 }
 
 /*

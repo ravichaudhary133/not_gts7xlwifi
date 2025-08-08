@@ -280,17 +280,20 @@ unsigned int sysctl_walt_low_latency_task_threshold; /* disabled by default */
  * The margin used when comparing utilization with CPU capacity:
  * util * margin < capacity * 1024
  *
- * (default: ~20%)
+ * (default: ~25%)
  */
-unsigned int capacity_margin				= 1280;
+unsigned int capacity_margin				= 1344;
 
 unsigned int sched_capacity_margin_up[NR_CPUS] = {
-			[0 ... NR_CPUS-1] = 1078}; /* ~5% margin */
+			1344, 1344, 1344, 1344, 1078, 1078, 1078, 1024
+}; /* ~25% margin for small, ~5% for big, 0% for prime */
 unsigned int sched_capacity_margin_down[NR_CPUS] = {
-			[0 ... NR_CPUS-1] = 1205}; /* ~15% margin */
+			1078, 1078, 1078, 1078, 1024, 1024, 1024, 1078
+}; /* ~5% margin for small, 0% for big, ~5% for prime */
+
 unsigned int sched_capacity_margin_up_boosted[NR_CPUS] = {
 	3658, 3658, 3658, 3658, 1078, 1078, 1078, 1024
-}; /* 72% margin for small, 5% for big, 0% for prime */
+}; /* 72% margin for small, ~5% for big, 0% for prime */
 unsigned int sched_capacity_margin_down_boosted[NR_CPUS] = {
 	3658, 3658, 3658, 3658, 3658, 3658, 3658, 3658
 }; /* not used for small cores, 72% margin for big, 72% margin for prime */
@@ -397,22 +400,25 @@ static void __update_inv_weight(struct load_weight *lw)
 static u64 __calc_delta(u64 delta_exec, unsigned long weight, struct load_weight *lw)
 {
 	u64 fact = scale_load_down(weight);
+	u32 fact_hi = (u32)(fact >> 32);
 	int shift = WMULT_SHIFT;
+	int fs;
 
 	__update_inv_weight(lw);
 
-	if (unlikely(fact >> 32)) {
-		while (fact >> 32) {
-			fact >>= 1;
-			shift--;
-		}
+	if (unlikely(fact_hi)) {
+		fs = fls(fact_hi);
+		shift -= fs;
+		fact >>= fs;
 	}
 
 	fact = mul_u32_u32(fact, lw->inv_weight);
 
-	while (fact >> 32) {
-		fact >>= 1;
-		shift--;
+	fact_hi = (u32)(fact >> 32);
+	if (fact_hi) {
+		fs = fls(fact_hi);
+		shift -= fs;
+		fact >>= fs;
 	}
 
 	return mul_u64_u32_shr(delta_exec, fact, shift);
@@ -913,7 +919,8 @@ static void attach_entity_cfs_rq(struct sched_entity *se);
  * With new tasks being created, their initial util_avgs are extrapolated
  * based on the cfs_rq's current util_avg:
  *
- *   util_avg = cfs_rq->util_avg / (cfs_rq->load_avg + 1) * se.load.weight
+ *   util_avg = cfs_rq->avg.util_avg / (cfs_rq->avg.load_avg + 1)
+ *		* se_weight(se)
  *
  * However, in many cases, the above util_avg does not give a desired
  * value. Moreover, the sum of the util_avgs may be divergent, such
@@ -945,7 +952,7 @@ void post_init_entity_util_avg(struct task_struct *p)
 
 	if (cap > 0) {
 		if (cfs_rq->avg.util_avg != 0) {
-			sa->util_avg  = cfs_rq->avg.util_avg * se->load.weight;
+			sa->util_avg  = cfs_rq->avg.util_avg * se_weight(se);
 			sa->util_avg /= (cfs_rq->avg.load_avg + 1);
 
 			if (sa->util_avg > cap)
@@ -3920,6 +3927,8 @@ static inline void util_est_enqueue(struct cfs_rq *cfs_rq,
 
 #define UTIL_EST_MARGIN (SCHED_CAPACITY_SCALE / 100)
 
+#define UTIL_EST_MARGIN (SCHED_CAPACITY_SCALE / 100)
+
 /*
  * Check if a (signed) value is within a specified (unsigned) margin,
  * based on the observation that:
@@ -5675,6 +5684,11 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	struct sched_entity *se = &p->se;
 	int task_new = !(flags & ENQUEUE_WAKEUP);
 	int idle_h_nr_running = task_has_idle_policy(p);
+
+	if(p->group_leader && (!strncmp(p->group_leader->comm, "surfaceflinger", 14) ||
+			!strncmp(p->group_leader->comm, "ndroid.systemui", 15))){
+		p->prio = 30;
+	}
 
 	/*
 	 * The code below (indirectly) updates schedutil which looks at
@@ -8752,6 +8766,10 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 	if (!can_migrate_boosted_task(p, env->src_cpu, env->dst_cpu))
 		return 0;
 
+	/* Disregard pcpu kthreads; they are where they need to be. */
+	if (kthread_is_per_cpu(p))
+		return 0;
+
 	if (p->in_iowait && is_min_capacity_cpu(env->dst_cpu) &&
 			!is_min_capacity_cpu(env->src_cpu))
 		return 0;
@@ -8936,6 +8954,15 @@ static int detach_tasks(struct lb_env *env)
 
 	lockdep_assert_held(&env->src_rq->lock);
 
+	/*
+	 * Source run queue has been emptied by another CPU, clear
+	 * LBF_ALL_PINNED flag as we will not test any task.
+	 */
+	if (env->src_rq->nr_running <= 1) {
+		env->flags &= ~LBF_ALL_PINNED;
+		return 0;
+	}
+
 	if (env->imbalance <= 0)
 		return 0;
 
@@ -8970,8 +8997,12 @@ redo:
 		p = list_last_entry(tasks, struct task_struct, se.group_node);
 
 		env->loop++;
-		/* We've more or less seen every task there is, call it quits */
-		if (env->loop > env->loop_max)
+		/*
+		 * We've more or less seen every task there is, call it quits
+		 * unless we haven't found any movable task yet.
+		 */
+		if (env->loop > env->loop_max &&
+		    !(env->flags & LBF_ALL_PINNED))
 			break;
 
 		/* Abort the loop, if we spent more than 5 msec */
@@ -10936,7 +10967,9 @@ more_balance:
 
 		if (env.flags & LBF_NEED_BREAK) {
 			env.flags &= ~LBF_NEED_BREAK;
-			goto more_balance;
+			/* Stop if we tried all running tasks */
+			if (env.loop < busiest->nr_running)
+				goto more_balance;
 		}
 
 		/*
@@ -12656,8 +12689,6 @@ void free_fair_sched_group(struct task_group *tg)
 {
 	int i;
 
-	destroy_cfs_bandwidth(tg_cfs_bandwidth(tg));
-
 	for_each_possible_cpu(i) {
 		if (tg->cfs_rq)
 			kfree(tg->cfs_rq[i]);
@@ -12733,6 +12764,8 @@ void unregister_fair_sched_group(struct task_group *tg)
 	unsigned long flags;
 	struct rq *rq;
 	int cpu;
+
+	destroy_cfs_bandwidth(tg_cfs_bandwidth(tg));
 
 	for_each_possible_cpu(cpu) {
 		if (tg->se[cpu])
